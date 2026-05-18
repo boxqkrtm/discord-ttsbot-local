@@ -1,19 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import os
 import shutil
 import uuid
 from pathlib import Path
-from typing import Any
+from collections.abc import AsyncIterator
+from typing import Any, Protocol
 
-import soundfile as sf
-import torch
-from huggingface_hub import snapshot_download
-from voxcpm import VoxCPM
-from voxcpm.modules.minicpm4.model import MiniCPMAttention, apply_rotary_pos_emb
 
 from voxcpm_discord.config import (
     DEFAULT_CFG_VALUE,
@@ -21,15 +18,37 @@ from voxcpm_discord.config import (
     LOGGER,
 )
 from voxcpm_discord.profiles import UserVoiceProfile
+from voxcpm_discord.text import split_tts_chunks
+
+
+class SpeechService(Protocol):
+    supports_voice_cloning: bool
+    supports_style_json: bool
+
+    async def synthesize(self, text: str, profile: UserVoiceProfile) -> Path: ...
+    async def synthesize_stream(self, text: str, profile: UserVoiceProfile) -> AsyncIterator[Path]: ...
+    async def warmup(self) -> None: ...
 
 
 _CPU_ATTENTION_PATCHED = False
+
+
+def create_tts_service(engine: str, output_dir: Path, model_data_dir: Path) -> SpeechService:
+    normalized = engine.strip().lower().replace("-", "").replace("_", "")
+    if normalized in {"", "supertonic", "supertonic3"}:
+        return SupertonicService(output_dir, model_data_dir)
+    if normalized == "voxcpm":
+        return VoxCPMService(os.getenv("VOXCPM_MODEL", "openbmb/VoxCPM2"), output_dir, model_data_dir)
+    raise ValueError("Unsupported TTS_ENGINE: " + engine)
 
 
 def _patch_voxcpm_cpu_attention() -> None:
     global _CPU_ATTENTION_PATCHED
     if _CPU_ATTENTION_PATCHED:
         return
+
+    import torch
+    from voxcpm.modules.minicpm4.model import MiniCPMAttention, apply_rotary_pos_emb
 
     original_forward_step = MiniCPMAttention.forward_step
 
@@ -83,15 +102,111 @@ def _patch_voxcpm_cpu_attention() -> None:
     _CPU_ATTENTION_PATCHED = True
 
 
+class SupertonicService:
+    supports_voice_cloning = False
+    supports_style_json = True
+
+    def __init__(self, output_dir: Path, model_data_dir: Path) -> None:
+        self.output_dir = output_dir
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.model_dir = model_data_dir / "supertonic"
+        self.model_dir.mkdir(parents=True, exist_ok=True)
+        self.model_name = os.getenv("SUPERTONIC_MODEL", "supertonic-3")
+        self.default_voice = os.getenv("SUPERTONIC_VOICE", "M1").strip() or "M1"
+        self.lang = os.getenv("SUPERTONIC_LANG", "ko").strip() or None
+        self.speed = float(os.getenv("SUPERTONIC_SPEED", "1.05"))
+        self.total_steps = int(os.getenv("SUPERTONIC_STEPS", "6"))
+        self.stream_chunk_chars = int(os.getenv("TTS_STREAM_CHUNK_CHARS", "40"))
+        self._model: Any | None = None
+        self._model_lock = asyncio.Lock()
+
+    async def synthesize(self, text: str, profile: UserVoiceProfile) -> Path:
+        model = await self._ensure_model()
+        output_path = self.output_dir / f"{uuid.uuid4().hex}.wav"
+        style = self._resolve_voice_style(model, profile)
+        await asyncio.to_thread(self._synthesize_sync, model, output_path, text, style)
+        return output_path
+
+    async def synthesize_stream(self, text: str, profile: UserVoiceProfile) -> AsyncIterator[Path]:
+        chunks = split_tts_chunks(text, self.stream_chunk_chars)
+        if not chunks:
+            return
+        LOGGER.info("Streaming Supertonic synthesis chunks=%s chars=%s", len(chunks), len(text))
+        for chunk in chunks:
+            yield await self.synthesize(chunk, profile)
+
+    async def warmup(self) -> None:
+        await self._ensure_model()
+        await self._run_warmup_synthesis()
+
+    async def _run_warmup_synthesis(self) -> None:
+        warmup_text = os.getenv("TTS_WARMUP_TEXT", "hi").strip()
+        if not warmup_text:
+            return
+
+        output_path = await self.synthesize(warmup_text, UserVoiceProfile())
+        LOGGER.info("Supertonic warmup synthesis completed path=%s", output_path)
+        with contextlib.suppress(OSError):
+            output_path.unlink()
+
+    async def _ensure_model(self) -> Any:
+        async with self._model_lock:
+            if self._model is None:
+                LOGGER.info(
+                    "Loading Supertonic model=%s model_dir=%s voice=%s lang=%s",
+                    self.model_name,
+                    self.model_dir,
+                    self.default_voice,
+                    self.lang,
+                )
+                from supertonic import TTS
+
+                self._model = await asyncio.to_thread(
+                    TTS,
+                    model=self.model_name,
+                    model_dir=self.model_dir,
+                    auto_download=True,
+                )
+        return self._model
+
+    def _resolve_voice_style(self, model: Any, profile: UserVoiceProfile) -> Any:
+        if profile.voice_prompt_path and Path(profile.voice_prompt_path).suffix.lower() == ".json":
+            return model.get_voice_style_from_path(profile.voice_prompt_path)
+
+        voice_name = (profile.sample_voice or self.default_voice).strip().upper()
+        if voice_name not in model.voice_style_names:
+            LOGGER.warning(
+                "Unknown Supertonic voice style %r; falling back to %s",
+                voice_name,
+                self.default_voice,
+            )
+            voice_name = self.default_voice
+        return model.get_voice_style(voice_name)
+
+    def _synthesize_sync(self, model: Any, output_path: Path, text: str, style: Any) -> None:
+        wav, _duration = model.synthesize(
+            text,
+            voice_style=style,
+            total_steps=self.total_steps,
+            speed=self.speed,
+            lang=self.lang,
+        )
+        model.save_audio(wav, output_path)
+
+
 class VoxCPMService:
+    supports_voice_cloning = True
+    supports_style_json = False
+
     def __init__(self, model_name: str, output_dir: Path, model_data_dir: Path) -> None:
         self.model_name = model_name
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.model_config_dir = model_data_dir / "model_overrides"
         self.model_config_dir.mkdir(parents=True, exist_ok=True)
-        self._model: VoxCPM | None = None
+        self._model: Any | None = None
         self._model_lock = asyncio.Lock()
+        self.stream_chunk_chars = int(os.getenv("TTS_STREAM_CHUNK_CHARS", "40"))
 
     async def synthesize(self, text: str, profile: UserVoiceProfile) -> Path:
         model = await self._ensure_model()
@@ -100,22 +215,43 @@ class VoxCPMService:
         await asyncio.to_thread(self._synthesize_sync, model, output_path, kwargs)
         return output_path
 
+    async def synthesize_stream(self, text: str, profile: UserVoiceProfile) -> AsyncIterator[Path]:
+        chunks = split_tts_chunks(text, self.stream_chunk_chars)
+        if not chunks:
+            return
+        LOGGER.info("Streaming VoxCPM synthesis chunks=%s chars=%s", len(chunks), len(text))
+        for chunk in chunks:
+            yield await self.synthesize(chunk, profile)
+
     async def warmup(self) -> None:
         await self._ensure_model()
+        await self._run_warmup_synthesis()
 
-    async def _ensure_model(self) -> VoxCPM:
+    async def _run_warmup_synthesis(self) -> None:
+        warmup_text = os.getenv("TTS_WARMUP_TEXT", "hi").strip()
+        if not warmup_text:
+            return
+
+        output_path = await self.synthesize(warmup_text, UserVoiceProfile())
+        LOGGER.info("VoxCPM warmup synthesis completed path=%s", output_path)
+        with contextlib.suppress(OSError):
+            output_path.unlink()
+
+    async def _ensure_model(self) -> Any:
         async with self._model_lock:
             if self._model is None:
                 device, dtype = self._resolve_runtime_config()
                 model_source = self._prepare_model_source(device, dtype)
                 optimize = device == "cuda"
                 LOGGER.info(
-                    "Loading model %s with device=%s dtype=%s optimize=%s",
+                    "Loading VoxCPM model %s with device=%s dtype=%s optimize=%s",
                     self.model_name,
                     device,
                     dtype,
                     optimize,
                 )
+                from voxcpm import VoxCPM
+
                 self._model = await asyncio.to_thread(
                     VoxCPM.from_pretrained,
                     model_source,
@@ -129,6 +265,8 @@ class VoxCPMService:
         requested_dtype = os.getenv("VOXCPM_DTYPE", "bfloat16").strip().lower()
 
         if requested_device in {"", "auto"}:
+            import torch
+
             if torch.cuda.is_available():
                 device = "cuda"
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -201,6 +339,8 @@ class VoxCPMService:
         if model_path.is_dir():
             return model_path
 
+        from huggingface_hub import snapshot_download
+
         return Path(snapshot_download(repo_id=self.model_name))
 
     def _build_generation_kwargs(
@@ -227,7 +367,9 @@ class VoxCPMService:
 
     @staticmethod
     def _synthesize_sync(
-        model: VoxCPM, output_path: Path, kwargs: dict[str, Any]
+        model: Any, output_path: Path, kwargs: dict[str, Any]
     ) -> None:
+        import soundfile as sf
+
         wav = model.generate(**kwargs)
         sf.write(output_path, wav, model.tts_model.sample_rate)

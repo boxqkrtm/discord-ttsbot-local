@@ -4,10 +4,10 @@ import asyncio
 import os
 from pathlib import Path
 
-from voxcpm_discord.bot import VoxCPMDiscordBot
-from voxcpm_discord.config import configure_logging, data_dir, model_data_dir, model_name, LOGGER
+from voxcpm_discord.bot import TTSDiscordBot
+from voxcpm_discord.config import configure_logging, data_dir, model_data_dir, tts_engine, LOGGER
 from voxcpm_discord.profiles import UserVoiceProfile
-from voxcpm_discord.tts import VoxCPMService
+from voxcpm_discord.tts import create_tts_service
 
 
 def _load_env_file() -> None:
@@ -32,13 +32,13 @@ def main() -> None:
     if not token:
         raise SystemExit("DISCORD_TOKEN is required")
 
-    bot = VoxCPMDiscordBot()
+    bot = TTSDiscordBot()
     bot.run(token, log_handler=None)
 
 
 async def _hi_tts_async() -> Path:
-    prompt = os.getenv("VOXCPM_HI_TEXT", "hi")
-    service = VoxCPMService(model_name(), data_dir() / "generated", model_data_dir())
+    prompt = os.getenv("TTS_HI_TEXT", os.getenv("VOXCPM_HI_TEXT", "hi"))
+    service = create_tts_service(tts_engine(), data_dir() / "generated", model_data_dir())
     output_path = await service.synthesize(prompt, UserVoiceProfile())
     LOGGER.info("Standalone hi TTS generated %s", output_path)
     return output_path

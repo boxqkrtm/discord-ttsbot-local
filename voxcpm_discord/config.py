@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 LOGGER = logging.getLogger("voxcpm_discord_bot")
-ALLOWED_PROMPT_EXTENSIONS = {".wav", ".mp3", ".ogg"}
+ALLOWED_PROMPT_EXTENSIONS = {".wav", ".mp3", ".ogg", ".json"}
 DEFAULT_CFG_VALUE = 2.0
 DEFAULT_INFERENCE_TIMESTEPS = 10
 PENDING_REACTION = "⏳"
@@ -16,11 +16,15 @@ PCM_PREBUFFER_FRAMES = 20
 
 
 def data_dir() -> Path:
-    return Path(os.getenv("VOXCPM_DATA_DIR", "data-user"))
+    return Path(os.getenv("TTS_DATA_DIR", os.getenv("VOXCPM_DATA_DIR", "data-user")))
 
 
 def model_data_dir() -> Path:
-    return Path(os.getenv("VOXCPM_MODEL_DATA_DIR", "data"))
+    return Path(os.getenv("TTS_MODEL_DATA_DIR", os.getenv("VOXCPM_MODEL_DATA_DIR", "data")))
+
+
+def tts_engine() -> str:
+    return os.getenv("TTS_ENGINE", "supertonic3")
 
 
 def model_name() -> str:

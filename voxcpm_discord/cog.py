@@ -16,7 +16,7 @@ from voxcpm_discord.profiles import UserVoiceProfile
 from voxcpm_discord.text import process_tts_text
 
 if TYPE_CHECKING:
-    from voxcpm_discord.bot import VoxCPMDiscordBot
+    from voxcpm_discord.bot import TTSDiscordBot
 
 
 class VoiceSettingsModal(discord.ui.Modal, title="음성 설정"):
@@ -37,21 +37,29 @@ class VoiceSettingsModal(discord.ui.Modal, title="음성 설정"):
 
     def __init__(
         self,
-        bot: VoxCPMDiscordBot,
+        bot: TTSDiscordBot,
         user_id: int,
         clone_file: tuple[str, bytes] | None,
         profile: UserVoiceProfile,
     ) -> None:
         super().__init__()
         self.bot = bot
+        self.supports_voice_cloning = bool(bot.tts_service.supports_voice_cloning)
+        self.supports_style_json = bool(bot.tts_service.supports_style_json)
         self.user_id = user_id
         self.clone_file = clone_file
+        if self.supports_voice_cloning:
+            self.sample_voice.placeholder = "음성 클로닝의 경우 비워주세요. 예: 차분한 젊은 여성 목소리"
+            self.prompt_text.default = profile.prompt_text or ""
+        else:
+            self.sample_voice.label = "음성 스타일"
+            self.sample_voice.placeholder = "M1-M5 또는 F1-F5. JSON 스타일 파일을 올린 경우 비워도 됩니다."
+            self.remove_item(self.prompt_text)
         self.sample_voice.default = profile.sample_voice or ""
-        self.prompt_text.default = profile.prompt_text or ""
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         sample_voice = str(self.sample_voice.value).strip()
-        prompt_text = str(self.prompt_text.value).strip()
+        prompt_text = str(self.prompt_text.value).strip() if self.supports_voice_cloning else ""
 
         profile = self.bot.profile_store.set_sample_voice(self.user_id, sample_voice)
 
@@ -63,7 +71,7 @@ class VoiceSettingsModal(discord.ui.Modal, title="음성 설정"):
                 content,
                 prompt_text or None,
             )
-        elif profile.voice_prompt_path and profile.prompt_text != (prompt_text or None):
+        elif self.supports_voice_cloning and profile.voice_prompt_path and profile.prompt_text != (prompt_text or None):
             existing_path = Path(profile.voice_prompt_path)
             profile = self.bot.profile_store.set_voice_prompt(
                 self.user_id,
@@ -74,13 +82,16 @@ class VoiceSettingsModal(discord.ui.Modal, title="음성 설정"):
 
         status = ["음성 설정을 저장했습니다."]
         status.append(f"스타일: `{profile.sample_voice or '미설정'}`")
-        status.append(f"클로닝: `{Path(profile.voice_prompt_path).name if profile.voice_prompt_path else '미설정'}`")
-        status.append(f"클로닝 대본: `{profile.prompt_text or '미설정'}`")
+        if self.supports_voice_cloning:
+            status.append(f"클로닝: `{Path(profile.voice_prompt_path).name if profile.voice_prompt_path else '미설정'}`")
+            status.append(f"클로닝 대본: `{profile.prompt_text or '미설정'}`")
+        elif self.supports_style_json:
+            status.append(f"스타일 JSON: `{Path(profile.voice_prompt_path).name if profile.voice_prompt_path else '미설정'}`")
         await send_ephemeral(interaction, "\n".join(status))
 
 
 class VoiceBotCog(commands.Cog):
-    def __init__(self, bot: VoxCPMDiscordBot) -> None:
+    def __init__(self, bot: TTSDiscordBot) -> None:
         self.bot = bot
 
     @app_commands.command(name="생성", description="프롬프트를 wav 음성 파일로 생성합니다")
@@ -127,7 +138,7 @@ class VoiceBotCog(commands.Cog):
             )
             return
 
-        filename = f"voxcpm-{output_path.stem}.wav"
+        filename = f"tts-{output_path.stem}.wav"
         response_message = await interaction.followup.send(
             content="생성 완료",
             file=discord.File(output_path, filename=filename),
@@ -183,11 +194,11 @@ class VoiceBotCog(commands.Cog):
 
     @app_commands.command(
         name="설정",
-        description="음성 클로닝 파일과 스타일 설정을 확인하거나 저장합니다",
+        description="현재 TTS 엔진의 음성 설정을 확인하거나 저장합니다",
     )
     @app_commands.rename(file="파일")
     @app_commands.describe(
-        file="선택 사항: 클로닝에 사용할 wav, mp3, 또는 ogg 파일",
+        file="선택 사항: VoxCPM은 wav/mp3/ogg, Supertonic은 JSON 스타일 파일",
     )
     async def open_voice_settings(
         self,
@@ -195,10 +206,21 @@ class VoiceBotCog(commands.Cog):
         file: discord.Attachment | None = None,
     ) -> None:
         clone_file = None
+        supports_voice_cloning = bool(self.bot.tts_service.supports_voice_cloning)
+        supports_style_json = bool(self.bot.tts_service.supports_style_json)
         if file is not None:
             suffix = Path(file.filename.lower()).suffix
             if suffix not in ALLOWED_PROMPT_EXTENSIONS:
-                await send_ephemeral(interaction, "wav, mp3, 또는 ogg 파일만 업로드할 수 있습니다.")
+                await send_ephemeral(interaction, "wav, mp3, ogg, json 파일만 업로드할 수 있습니다.")
+                return
+            if supports_voice_cloning and suffix == ".json":
+                await send_ephemeral(interaction, "현재 엔진은 JSON 스타일 파일을 사용하지 않습니다.")
+                return
+            if not supports_voice_cloning and suffix != ".json":
+                await send_ephemeral(interaction, "현재 엔진은 보이스 클로닝을 지원하지 않습니다. Supertonic 스타일 JSON만 업로드할 수 있습니다.")
+                return
+            if not supports_style_json and suffix == ".json":
+                await send_ephemeral(interaction, "현재 엔진은 JSON 스타일 파일을 지원하지 않습니다.")
                 return
             clone_file = (suffix, await file.read())
 

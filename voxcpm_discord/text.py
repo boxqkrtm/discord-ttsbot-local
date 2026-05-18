@@ -95,3 +95,40 @@ def process_tts_text(text: str) -> str:
         lambda match: f" {_HANGUL_COMPAT_JAMO_NAMES[match.group(0)]} ", text
     )
     return " ".join(text.split())
+
+
+
+def split_tts_chunks(text: str, max_chars: int = 40) -> list[str]:
+    text = process_tts_text(text)
+    if not text:
+        return []
+
+    chunks: list[str] = []
+    current = ""
+    sentence_breaks = set(".!?。！？…\n")
+    soft_breaks = set(",，、;；:：")
+
+    def flush() -> None:
+        nonlocal current
+        if current.strip():
+            chunks.append(current.strip())
+        current = ""
+
+    for char in text:
+        current += char
+        if len(current) >= max_chars and char.isspace():
+            flush()
+        elif len(current) >= max_chars and char in soft_breaks:
+            flush()
+        elif len(current) >= max_chars * 0.6 and char in sentence_breaks:
+            flush()
+        elif len(current) >= max_chars:
+            last_space = current.rfind(" ")
+            if last_space > max_chars // 2:
+                chunks.append(current[:last_space].strip())
+                current = current[last_space + 1 :]
+            else:
+                flush()
+
+    flush()
+    return chunks or [text]

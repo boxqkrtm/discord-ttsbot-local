@@ -18,7 +18,7 @@ call :setup_venv
 if errorlevel 1 goto error
 
 echo.
-echo Starting VoxCPM Discord bot...
+echo Starting Discord TTS bot with %TTS_ENGINE% engine...
 ".venv\Scripts\python.exe" -c "from voxcpm_discord.app import main; main()"
 
 set "EXIT_CODE=%ERRORLEVEL%"
@@ -31,6 +31,7 @@ if not "%EXIT_CODE%"=="0" (
 exit /b %EXIT_CODE%
 
 :setup_ffmpeg
+if defined TTS_FFMPEG_BIN set "PATH=%TTS_FFMPEG_BIN%;%PATH%"
 if defined VOXCPM_FFMPEG_BIN set "PATH=%VOXCPM_FFMPEG_BIN%;%PATH%"
 call :detect_ffmpeg
 if not errorlevel 1 exit /b 0
@@ -61,7 +62,7 @@ for /d %%D in ("%LocalAppData%\Microsoft\WinGet\Packages\Gyan.FFmpeg_*") do (
         if exist "%%~fB\ffmpeg.exe" (
             set "FFMPEG_BIN=%%~fB"
             set "PATH=%%~fB;%PATH%"
-            setx VOXCPM_FFMPEG_BIN "%%~fB" >nul
+            setx TTS_FFMPEG_BIN "%%~fB" >nul
             exit /b 0
         )
     )
@@ -73,15 +74,29 @@ if exist ".env" exit /b 0
 
 echo.
 echo First setup
-echo 1. CPU
-echo 2. NVIDIA CUDA
-choice /c 12 /n /m "Select runtime [1-2]: "
+echo 1. Supertonic 3 CPU, lightweight, no voice cloning
+echo 2. VoxCPM, heavier, supports voice cloning
+choice /c 12 /n /m "Select TTS engine [1-2]: "
 if errorlevel 2 (
-    set "VOXCPM_DEVICE_VALUE=cuda"
-    set "VOXCPM_DTYPE_VALUE=float16"
+    set "TTS_ENGINE_VALUE=voxcpm"
 ) else (
-    set "VOXCPM_DEVICE_VALUE=cpu"
-    set "VOXCPM_DTYPE_VALUE=float32"
+    set "TTS_ENGINE_VALUE=supertonic3"
+)
+
+set "VOXCPM_DEVICE_VALUE=cpu"
+set "VOXCPM_DTYPE_VALUE=float32"
+if /i "%TTS_ENGINE_VALUE%"=="voxcpm" (
+    echo.
+    echo 1. CPU
+    echo 2. NVIDIA CUDA
+    choice /c 12 /n /m "Select VoxCPM runtime [1-2]: "
+    if errorlevel 2 (
+        set "VOXCPM_DEVICE_VALUE=cuda"
+        set "VOXCPM_DTYPE_VALUE=float16"
+    ) else (
+        set "VOXCPM_DEVICE_VALUE=cpu"
+        set "VOXCPM_DTYPE_VALUE=float32"
+    )
 )
 
 echo.
@@ -93,11 +108,9 @@ if "%DISCORD_TOKEN_VALUE%"=="" (
 
 > ".env" (
     echo DISCORD_TOKEN=%DISCORD_TOKEN_VALUE%
-    echo VOXCPM_MODEL=openbmb/VoxCPM2
-    echo VOXCPM_MODEL_DATA_DIR=data
-    echo VOXCPM_DEVICE=%VOXCPM_DEVICE_VALUE%
-    echo VOXCPM_DTYPE=%VOXCPM_DTYPE_VALUE%
-    echo VOXCPM_DATA_DIR=data-user
+    echo TTS_ENGINE=%TTS_ENGINE_VALUE%
+    if /i "%TTS_ENGINE_VALUE%"=="voxcpm" echo VOXCPM_DEVICE=%VOXCPM_DEVICE_VALUE%
+    if /i "%TTS_ENGINE_VALUE%"=="voxcpm" echo VOXCPM_DTYPE=%VOXCPM_DTYPE_VALUE%
     echo LOG_LEVEL=INFO
 )
 exit /b 0
@@ -106,6 +119,7 @@ exit /b 0
 if exist ".env" (
     for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do set "%%A=%%B"
 )
+if not defined TTS_ENGINE set "TTS_ENGINE=supertonic3"
 exit /b 0
 
 :setup_uv_python
@@ -191,14 +205,17 @@ echo Installing dependencies with uv...
 "%UV%" pip install --python ".venv\Scripts\python.exe" --upgrade pip
 if errorlevel 1 exit /b 1
 
-if /i "%VOXCPM_DEVICE%"=="cuda" (
-    "%UV%" pip install --python ".venv\Scripts\python.exe" torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+if /i "%TTS_ENGINE%"=="voxcpm" (
+    if /i "%VOXCPM_DEVICE%"=="cuda" (
+        "%UV%" pip install --python ".venv\Scripts\python.exe" torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+    ) else (
+        "%UV%" pip install --python ".venv\Scripts\python.exe" torch torchaudio
+    )
+    if errorlevel 1 exit /b 1
+    "%UV%" pip install --python ".venv\Scripts\python.exe" -e ".[voxcpm]"
 ) else (
-    "%UV%" pip install --python ".venv\Scripts\python.exe" torch torchaudio
+    "%UV%" pip install --python ".venv\Scripts\python.exe" -e .
 )
-if errorlevel 1 exit /b 1
-
-"%UV%" pip install --python ".venv\Scripts\python.exe" -e .
 if errorlevel 1 exit /b 1
 
 exit /b 0

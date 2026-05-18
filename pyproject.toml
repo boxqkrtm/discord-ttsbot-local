@@ -1,10 +1,15 @@
 [project]
-name = "voxcpm-discord-bot"
+name = "discord-ttsbot-local"
 version = "0.1.0"
-description = "Discord voice bot using VoxCPM2 and discord.py"
+description = "Local Discord TTS bot with selectable Supertonic 3 or VoxCPM engines"
 requires-python = ">=3.11,<3.13"
 dependencies = [
   "discord.py[voice]>=2.4.0",
+  "supertonic",
+]
+
+[project.optional-dependencies]
+voxcpm = [
   "huggingface_hub",
   "soundfile>=0.13.1",
   "torch",
@@ -13,8 +18,8 @@ dependencies = [
 ]
 
 [project.scripts]
-voxcpm-discord-bot = "voxcpm_discord.app:main"
-voxcpm-discord-hi = "voxcpm_discord.app:hi_main"
+discord-ttsbot-local = "voxcpm_discord.app:main"
+discord-ttsbot-local-hi = "voxcpm_discord.app:hi_main"
 
 [build-system]
 requires = ["hatchling>=1.27.0"]

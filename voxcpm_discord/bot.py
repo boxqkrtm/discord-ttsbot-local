@@ -6,15 +6,15 @@ import time
 import discord
 from discord.ext import commands
 
-from voxcpm_discord.config import LOGGER, MAX_MESSAGE_LENGTH, data_dir, model_data_dir, model_name
+from voxcpm_discord.config import LOGGER, MAX_MESSAGE_LENGTH, data_dir, model_data_dir, tts_engine
 from voxcpm_discord.discord_helpers import add_pending_reaction
 from voxcpm_discord.profiles import UserVoiceProfile, VoiceProfileStore
 from voxcpm_discord.sessions import GuildSession, SpeechRequest
 from voxcpm_discord.text import process_tts_text
-from voxcpm_discord.tts import VoxCPMService
+from voxcpm_discord.tts import create_tts_service
 
 
-class VoxCPMDiscordBot(commands.Bot):
+class TTSDiscordBot(commands.Bot):
     def __init__(self) -> None:
         intents = discord.Intents.default()
         intents.guilds = True
@@ -25,8 +25,8 @@ class VoxCPMDiscordBot(commands.Bot):
         super().__init__(command_prefix=commands.when_mentioned, intents=intents)
 
         self.profile_store = VoiceProfileStore(data_dir())
-        self.tts_service = VoxCPMService(
-            model_name(), self.profile_store.generated_dir, model_data_dir()
+        self.tts_service = create_tts_service(
+            tts_engine(), self.profile_store.generated_dir, model_data_dir()
         )
         self.sessions: dict[int, GuildSession] = {}
         self._startup_voice_cleanup_done = False
@@ -36,7 +36,7 @@ class VoxCPMDiscordBot(commands.Bot):
         from voxcpm_discord.cog import VoiceBotCog
 
         await self.add_cog(VoiceBotCog(self))
-        self._model_warmup_task = asyncio.create_task(self._warm_model(), name="voxcpm-model-warmup")
+        self._model_warmup_task = asyncio.create_task(self._warm_model(), name="tts-model-warmup")
         await self.tree.sync()
 
     async def on_ready(self) -> None:
@@ -66,6 +66,7 @@ class VoxCPMDiscordBot(commands.Bot):
             for guild_id in guild_ids:
                 await self.close_session(guild_id)
 
+        disconnected_guilds: set[int] = set()
         for voice_client in list(self.voice_clients):
             if voice_client.is_connected():
                 LOGGER.info(
@@ -73,7 +74,36 @@ class VoxCPMDiscordBot(commands.Bot):
                     getattr(voice_client.guild, "id", None),
                     getattr(getattr(voice_client, "channel", None), "id", None),
                 )
+                disconnected_guilds.add(voice_client.guild.id)
                 await voice_client.disconnect(force=True)
+
+        for guild in self.guilds:
+            if guild.id in disconnected_guilds:
+                continue
+
+            member = guild.me
+            if member is None or member.voice is None or member.voice.channel is None:
+                continue
+
+            channel = member.voice.channel
+            LOGGER.info(
+                "Clearing stale startup voice state guild=%s channel=%s",
+                guild.id,
+                channel.id,
+            )
+            try:
+                voice_client = await channel.connect(timeout=10.0, reconnect=False)
+                await voice_client.disconnect(force=True)
+            except discord.ClientException:
+                existing_client = guild.voice_client
+                if existing_client is not None and existing_client.is_connected():
+                    await existing_client.disconnect(force=True)
+            except Exception:
+                LOGGER.exception(
+                    "Failed to clear stale startup voice state guild=%s channel=%s",
+                    guild.id,
+                    channel.id,
+                )
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or message.guild is None:
@@ -320,8 +350,61 @@ class VoxCPMDiscordBot(commands.Bot):
         while voice_client.is_playing() or voice_client.is_paused():
             await asyncio.sleep(0.1)
 
-        output_path = await self.tts_service.synthesize(request.text, profile)
+        queue: asyncio.Queue[object] = asyncio.Queue(maxsize=2)
 
+        async def produce_audio() -> None:
+            try:
+                async for output_path in self.tts_service.synthesize_stream(request.text, profile):
+                    await queue.put(output_path)
+            except Exception as exc:
+                await queue.put(exc)
+            finally:
+                await queue.put(None)
+
+        producer = asyncio.create_task(produce_audio(), name="tts-stream-producer")
+        first_audio = True
+        chunk_index = 0
+
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+
+                if not voice_client.is_connected():
+                    LOGGER.info("Stopping streaming playback: voice client disconnected")
+                    break
+
+                chunk_index += 1
+                if first_audio:
+                    first_audio = False
+                    LOGGER.info(
+                        "First audio delay author=%s delay_ms=%.1f text=%r",
+                        request.user_id,
+                        (time.perf_counter() - request.queued_at) * 1000,
+                        request.text,
+                    )
+                else:
+                    LOGGER.info(
+                        "Streaming audio chunk author=%s chunk=%s text=%r",
+                        request.user_id,
+                        chunk_index,
+                        request.text,
+                    )
+
+                await self._play_audio_path(voice_client, item)
+        finally:
+            if not producer.done():
+                producer.cancel()
+                try:
+                    await producer
+                except asyncio.CancelledError:
+                    pass
+
+    @staticmethod
+    async def _play_audio_path(voice_client: discord.VoiceClient, output_path: object) -> None:
         loop = asyncio.get_running_loop()
         finished = asyncio.Event()
         playback_error: list[Exception | None] = [None]
@@ -330,15 +413,14 @@ class VoxCPMDiscordBot(commands.Bot):
             playback_error[0] = error
             loop.call_soon_threadsafe(finished.set)
 
-        LOGGER.info(
-            "First audio delay author=%s delay_ms=%.1f text=%r",
-            request.user_id,
-            (time.perf_counter() - request.queued_at) * 1000,
-            request.text,
-        )
+        if not voice_client.is_connected():
+            return
 
         voice_client.play(discord.FFmpegPCMAudio(str(output_path)), after=after_playback)
         await finished.wait()
 
         if playback_error[0] is not None:
             raise RuntimeError("ffmpeg playback failed") from playback_error[0]
+
+
+VoxCPMDiscordBot = TTSDiscordBot
