@@ -5,26 +5,37 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 UV=""
 SUDO=""
+SUDO_WARNING=""
 
 command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
 setup_sudo() {
+    SUDO=""
+    SUDO_WARNING=""
+
     if [ "$(id -u)" -eq 0 ]; then
-        SUDO=""
+        return 0
     elif command_exists sudo; then
-        SUDO="sudo"
-    else
-        SUDO=""
+        sudo_check_output="$(sudo -n true 2>&1 || true)"
+        if [ -z "$sudo_check_output" ]; then
+            SUDO="sudo"
+        elif printf '%s\n' "$sudo_check_output" | grep -Eq "must be owned by uid 0|setuid bit|sudo.conf is owned"; then
+            SUDO_WARNING="sudo is installed but appears to be misconfigured: $sudo_check_output"
+        else
+            SUDO="sudo"
+        fi
     fi
 }
 
 run_privileged() {
     if [ -n "$SUDO" ]; then
         $SUDO "$@"
-    else
+    elif [ "$(id -u)" -eq 0 ]; then
         "$@"
+    else
+        return 1
     fi
 }
 
@@ -57,9 +68,13 @@ setup_ffmpeg() {
             fi
             if command_exists dnf; then
                 run_privileged dnf install -y ffmpeg && return 0
+                run_privileged dnf install -y ffmpeg-free && return 0
+                run_privileged dnf install -y ffmpeg-free --enablerepo=ol9_codeready_builder && return 0
             fi
             if command_exists yum; then
                 run_privileged yum install -y ffmpeg && return 0
+                run_privileged yum install -y ffmpeg-free && return 0
+                run_privileged yum install -y ffmpeg-free --enablerepo=ol9_codeready_builder && return 0
             fi
             if command_exists pacman; then
                 run_privileged pacman -Sy --needed --noconfirm ffmpeg && return 0
@@ -89,7 +104,11 @@ setup_ffmpeg() {
         run_privileged pkg install -y ffmpeg && return 0
     fi
 
+    if [ -n "$SUDO_WARNING" ]; then
+        echo "$SUDO_WARNING" >&2
+    fi
     echo "Could not install ffmpeg automatically. Install ffmpeg manually and try again." >&2
+    echo "If ffmpeg is already installed outside PATH, set TTS_FFMPEG_BIN to the directory containing ffmpeg." >&2
     return 1
 }
 
