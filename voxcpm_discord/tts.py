@@ -278,6 +278,15 @@ class VoxCPMService:
         else:
             raise ValueError(f"Unsupported VOXCPM_DEVICE: {requested_device}")
 
+        if device == "cuda":
+            import torch
+
+            if not torch.cuda.is_available():
+                raise RuntimeError(
+                    "VOXCPM_DEVICE=cuda was requested, but PyTorch CUDA is not available. "
+                    "Install a CUDA-enabled torch build or use VOXCPM_DEVICE=auto/cpu."
+                )
+
         if requested_dtype in {"", "auto"}:
             dtype = "bfloat16" if device == "cuda" else "float32"
         elif requested_dtype in {"bfloat16", "bf16", "float16", "fp16", "float32", "fp32"}:

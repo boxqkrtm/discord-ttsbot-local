@@ -11,6 +11,23 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+cuda_runtime_available() {
+    command_exists nvidia-smi || command_exists nvcc
+}
+
+use_cuda_torch() {
+    device_lower="$(printf '%s' "${VOXCPM_DEVICE:-auto}" | tr '[:upper:]' '[:lower:]')"
+    case "$device_lower" in
+        cuda) return 0 ;;
+        ""|auto)
+            if cuda_runtime_available; then
+                return 0
+            fi
+            ;;
+    esac
+    return 1
+}
+
 setup_sudo() {
     SUDO=""
     SUDO_WARNING=""
@@ -129,27 +146,41 @@ setup_env() {
         *) TTS_ENGINE_VALUE="supertonic3" ;;
     esac
 
-    VOXCPM_DEVICE_VALUE="cpu"
-    VOXCPM_DTYPE_VALUE="float32"
+    VOXCPM_DEVICE_VALUE="auto"
+    VOXCPM_DTYPE_VALUE="auto"
     if [ "$TTS_ENGINE_VALUE" = "voxcpm" ]; then
         echo
-        echo "1. CPU"
+        echo "1. Auto"
         if [ "$(uname -s)" = "Darwin" ]; then
-            echo "2. Apple Silicon MPS"
-            printf "Select VoxCPM runtime [1-2]: "
+            echo "2. CPU"
+            echo "3. Apple Silicon MPS"
+            printf "Select VoxCPM runtime [1-3]: "
             read -r runtime_choice
-            if [ "$runtime_choice" = "2" ]; then
-                VOXCPM_DEVICE_VALUE="mps"
-                VOXCPM_DTYPE_VALUE="float32"
-            fi
+            case "$runtime_choice" in
+                2)
+                    VOXCPM_DEVICE_VALUE="cpu"
+                    VOXCPM_DTYPE_VALUE="float32"
+                    ;;
+                3)
+                    VOXCPM_DEVICE_VALUE="mps"
+                    VOXCPM_DTYPE_VALUE="float32"
+                    ;;
+            esac
         else
-            echo "2. NVIDIA CUDA"
-            printf "Select VoxCPM runtime [1-2]: "
+            echo "2. CPU"
+            echo "3. NVIDIA CUDA"
+            printf "Select VoxCPM runtime [1-3]: "
             read -r runtime_choice
-            if [ "$runtime_choice" = "2" ]; then
-                VOXCPM_DEVICE_VALUE="cuda"
-                VOXCPM_DTYPE_VALUE="float16"
-            fi
+            case "$runtime_choice" in
+                2)
+                    VOXCPM_DEVICE_VALUE="cpu"
+                    VOXCPM_DTYPE_VALUE="float32"
+                    ;;
+                3)
+                    VOXCPM_DEVICE_VALUE="cuda"
+                    VOXCPM_DTYPE_VALUE="float16"
+                    ;;
+            esac
         fi
     fi
 
@@ -262,7 +293,7 @@ setup_venv() {
 
     engine_lower="$(printf '%s' "${TTS_ENGINE:-supertonic3}" | tr '[:upper:]' '[:lower:]')"
     if [ "$engine_lower" = "voxcpm" ]; then
-        if [ "${VOXCPM_DEVICE:-cpu}" = "cuda" ]; then
+        if use_cuda_torch; then
             "$UV" pip install --python .venv/bin/python torch torchaudio --index-url https://download.pytorch.org/whl/cu128
         else
             "$UV" pip install --python .venv/bin/python torch torchaudio

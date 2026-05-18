@@ -49,7 +49,9 @@ macOS/Linux:
   - macOS/Linux: `brew`, 일부 배포판 패키지 매니저, 또는 Astral 공식 설치 스크립트
 - `uv`로 Python 3.11 준비
 - `.env`가 없으면 `supertonic3`/`voxcpm` 엔진 선택
-- VoxCPM 선택 시 CPU/CUDA 선택
+- VoxCPM 선택 시 Auto/CPU/CUDA 선택
+  - Auto는 `nvidia-smi` 또는 `nvcc`가 있으면 CUDA용 PyTorch wheel을 설치합니다.
+  - CUDA를 직접 선택하면 CUDA용 PyTorch wheel을 설치하고, 런타임에서 CUDA 사용 가능 여부를 확인합니다.
 - 디스코드 봇 토큰 입력 후 `.env` 생성
 - 선택한 엔진에 필요한 패키지 설치
 - 봇 실행

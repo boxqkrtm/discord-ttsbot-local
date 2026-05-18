@@ -83,17 +83,18 @@ if errorlevel 2 (
     set "TTS_ENGINE_VALUE=supertonic3"
 )
 
-set "VOXCPM_DEVICE_VALUE=cpu"
-set "VOXCPM_DTYPE_VALUE=float32"
+set "VOXCPM_DEVICE_VALUE=auto"
+set "VOXCPM_DTYPE_VALUE=auto"
 if /i "%TTS_ENGINE_VALUE%"=="voxcpm" (
     echo.
-    echo 1. CPU
-    echo 2. NVIDIA CUDA
-    choice /c 12 /n /m "Select VoxCPM runtime [1-2]: "
-    if errorlevel 2 (
+    echo 1. Auto
+    echo 2. CPU
+    echo 3. NVIDIA CUDA
+    choice /c 123 /n /m "Select VoxCPM runtime [1-3]: "
+    if errorlevel 3 (
         set "VOXCPM_DEVICE_VALUE=cuda"
         set "VOXCPM_DTYPE_VALUE=float16"
-    ) else (
+    ) else if errorlevel 2 (
         set "VOXCPM_DEVICE_VALUE=cpu"
         set "VOXCPM_DTYPE_VALUE=float32"
     )
@@ -206,7 +207,8 @@ echo Installing dependencies with uv...
 if errorlevel 1 exit /b 1
 
 if /i "%TTS_ENGINE%"=="voxcpm" (
-    if /i "%VOXCPM_DEVICE%"=="cuda" (
+    call :use_cuda_torch
+    if not errorlevel 1 (
         "%UV%" pip install --python ".venv\Scripts\python.exe" torch torchaudio --index-url https://download.pytorch.org/whl/cu128
     ) else (
         "%UV%" pip install --python ".venv\Scripts\python.exe" torch torchaudio
@@ -219,6 +221,25 @@ if /i "%TTS_ENGINE%"=="voxcpm" (
 if errorlevel 1 exit /b 1
 
 exit /b 0
+
+:detect_cuda_runtime
+where nvidia-smi >nul 2>nul
+if not errorlevel 1 exit /b 0
+where nvcc >nul 2>nul
+if not errorlevel 1 exit /b 0
+exit /b 1
+
+:use_cuda_torch
+if /i "%VOXCPM_DEVICE%"=="cuda" exit /b 0
+if "%VOXCPM_DEVICE%"=="" (
+    call :detect_cuda_runtime
+    exit /b %ERRORLEVEL%
+)
+if /i "%VOXCPM_DEVICE%"=="auto" (
+    call :detect_cuda_runtime
+    exit /b %ERRORLEVEL%
+)
+exit /b 1
 
 :error
 echo.
